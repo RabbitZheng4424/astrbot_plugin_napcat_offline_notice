@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import time
@@ -14,7 +14,7 @@ from astrbot.core.umo_alias import parse_umo
 
 @register(
     "astrbot_plugin_napcat_offline_notice",
-    "qiongqiong",
+    "瑞贝特",
     "监控 OneBot v11/NapCat 连接状态，在掉线或恢复后主动通知指定会话，并尽量使用该会话当前的模型与人格生成提醒文案",
     "0.1.0",
 )
@@ -542,3 +542,4 @@ class NapcatOfflineNoticePlugin(Star):
 
     def _use_llm(self) -> bool:
         return bool(self.config.get("use_llm", True))
+
