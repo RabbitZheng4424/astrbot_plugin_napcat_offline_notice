@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import time
@@ -85,10 +85,13 @@ class NapcatOfflineNoticePlugin(Star):
         }
         targets.append(target)
         await self._save_targets(targets)
-        yield event.plain_result(
-            "已绑定当前会话为 NapCat 掉线通知目标。\n"
-            f"会话：{self._format_target_display(target)}"
-        )
+        lines = [
+            "已绑定当前会话为 NapCat 掉线通知目标。",
+            f"会话：{self._format_target_display(target)}",
+        ]
+        if hint := self._get_target_delivery_hint(target):
+            lines.append(f"提示：{hint}")
+        yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @napcat_notice.command("unbind")
@@ -120,6 +123,8 @@ class NapcatOfflineNoticePlugin(Star):
         for index, item in enumerate(targets, start=1):
             lines.append(f"{index}. {self._format_target_display(item)}")
             lines.append(f"   {item.get('umo', '')}")
+            if hint := self._get_target_delivery_hint(item):
+                lines.append(f"   提示：{hint}")
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -151,6 +156,15 @@ class NapcatOfflineNoticePlugin(Star):
             lines.extend(current_rows)
         else:
             lines.append("- 当前没有匹配到可监控的 aiocqhttp 平台实例。")
+
+        target_hints = [
+            f"  - {self._format_target_display(item)}：{hint}"
+            for item in targets
+            if (hint := self._get_target_delivery_hint(item))
+        ]
+        if target_hints:
+            lines.append("- 当前已绑定目标中的发送限制提示：")
+            lines.extend(target_hints)
 
         if missing:
             lines.append("- 以下配置的平台 ID 当前不存在：")
@@ -499,6 +513,19 @@ class NapcatOfflineNoticePlugin(Star):
         message_type = str(target.get("message_type", "unknown")).strip() or "unknown"
         session_id = str(target.get("session_id", target.get("umo", ""))).strip()
         return f"{platform} / {message_type} / {session_id}"
+
+    def _get_target_delivery_hint(self, target: dict[str, Any]) -> str:
+        platform = str(target.get("platform", "")).strip()
+        if platform == "weixin_official_account":
+            return "微信公众号适配器不支持主动推送，绑定后也无法收到掉线通知。"
+        if platform == "weixin_oc":
+            return (
+                "个人微信依赖最近会话上下文。目标会话需要近期给 AstrBot 发过消息，"
+                "刷新上下文后主动通知才更可能成功。"
+            )
+        if platform == "wecom":
+            return "企业微信部分模式不支持主动发送；若是客服模式，通常无法收到主动通知。"
+        return ""
 
     def _status_text(self, status: str) -> str:
         if status == "recovery":
