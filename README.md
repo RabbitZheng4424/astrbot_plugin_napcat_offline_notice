@@ -172,6 +172,8 @@ data/plugins/astrbot_plugin_napcat_offline_notice
 ## 注意事项
 
 - 目标会话所在平台必须支持主动消息发送
+- 如果目标会话本身就在同一个 NapCat / OneBot v11 平台实例上，那么它掉线时无法靠自己给自己发通知；这类目标更适合作为“恢复通知”接收者，而不是“掉线告警”接收者
+- 个人微信 `weixin_oc` 的主动发送依赖最近会话上下文；如果长期没说过话，`/napcat_notice test` 也可能失败，需要先给 AstrBot 发一条真实消息刷新上下文
 - 如果你配置了多个 NapCat / OneBot v11 实例，建议为不同平台实例设置清晰的 `id`
 - 如果未来 AstrBot 内部 `aiocqhttp` 连接实现发生变化，本插件的监控逻辑可能需要做适配更新
 

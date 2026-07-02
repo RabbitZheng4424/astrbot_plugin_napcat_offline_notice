@@ -288,6 +288,12 @@ class NapcatOfflineNoticePlugin(Star):
             target_umo = target.get("umo", "").strip()
             if not target_umo:
                 continue
+            if not self._can_deliver_to_target(
+                target,
+                source_platform_id=platform_id,
+                status=status,
+            ):
+                continue
 
             text = await self._build_notice_text(
                 target_umo=target_umo,
@@ -515,17 +521,53 @@ class NapcatOfflineNoticePlugin(Star):
         return f"{platform} / {message_type} / {session_id}"
 
     def _get_target_delivery_hint(self, target: dict[str, Any]) -> str:
-        platform = str(target.get("platform", "")).strip()
-        if platform == "weixin_official_account":
+        platform_id = str(target.get("platform", "")).strip()
+        platform_name = self._get_platform_name_by_id(platform_id)
+        if platform_name == "weixin_official_account":
             return "微信公众号适配器不支持主动推送，绑定后也无法收到掉线通知。"
-        if platform == "weixin_oc":
+        if platform_name == "weixin_oc":
             return (
                 "个人微信依赖最近会话上下文。目标会话需要近期给 AstrBot 发过消息，"
                 "刷新上下文后主动通知才更可能成功。"
             )
-        if platform == "wecom":
+        if platform_name == "wecom":
             return "企业微信部分模式不支持主动发送；若是客服模式，通常无法收到主动通知。"
+        if platform_name == "aiocqhttp":
+            return (
+                "如果这里绑定的是同一个 NapCat / OneBot v11 平台实例，"
+                "它掉线时无法靠自己给自己发通知；请优先绑定到其他仍在线的平台会话。"
+            )
         return ""
+
+    def _can_deliver_to_target(
+        self,
+        target: dict[str, Any],
+        *,
+        source_platform_id: str,
+        status: str,
+    ) -> bool:
+        target_platform_id = str(target.get("platform", "")).strip()
+        target_platform_name = self._get_platform_name_by_id(target_platform_id)
+        if (
+            status == "offline"
+            and target_platform_name == "aiocqhttp"
+            and target_platform_id == source_platform_id
+        ):
+            logger.warning(
+                "[NapcatOfflineNotice] 跳过向 %s 发送离线通知：目标会话就在同一个 NapCat 平台 %s 上，"
+                "该平台离线时无法给自己发通知。",
+                target.get("umo", "").strip(),
+                source_platform_id,
+            )
+            return False
+        return True
+
+    def _get_platform_name_by_id(self, platform_id: str) -> str:
+        for platform in self.context.platform_manager.platform_insts:
+            meta = platform.meta()
+            if meta.id == platform_id:
+                return meta.name
+        return platform_id
 
     def _status_text(self, status: str) -> str:
         if status == "recovery":
