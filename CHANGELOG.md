@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.3.0
+
+### Fixed
+
+- Preserve one administrator session per platform instead of overwriting all targets with the latest session.
+- Trust AstrBot administrator role detection when recording sessions.
+- Exclude NapCat/aiocqhttp sessions from cross-platform delivery.
+- Mark notification cooldown only after a successful delivery.
+- Retry while discovering newly recorded cross-platform administrator sessions.
 ## 0.1.0
 
 Initial available release.

@@ -1,42 +1,52 @@
 {
-  "target_platform_ids": {
-    "type": "text",
-    "default": "",
-    "description": "要监控的 aiocqhttp 平台 ID。每行或用英文逗号填写一个；留空表示监控全部 OneBot v11/NapCat 实例。"
-  },
-  "poll_interval_seconds": {
-    "type": "int",
-    "default": 5,
-    "description": "连接状态轮询间隔（秒）"
-  },
-  "offline_cooldown_seconds": {
-    "type": "int",
-    "default": 600,
-    "description": "同一平台相同状态的重复通知冷却时间（秒）"
-  },
-  "notify_recovery": {
-    "type": "bool",
-    "default": true,
-    "description": "NapCat 恢复连接后是否也发送通知"
-  },
-  "use_llm": {
-    "type": "bool",
-    "default": true,
-    "description": "是否优先用目标会话当前的模型与人格生成通知文案"
-  },
-  "fallback_offline_template": {
-    "type": "text",
-    "default": "提醒一下，{platform_id} 对应的 NapCat 现在断开了，QQ 侧消息暂时收不到了。{detail}",
-    "description": "掉线时的回退通知模板"
-  },
-  "fallback_recovery_template": {
-    "type": "text",
-    "default": "好消息，{platform_id} 对应的 NapCat 已经重新连上了，QQ 侧消息恢复正常啦。{detail}",
-    "description": "恢复时的回退通知模板"
-  },
-  "llm_prompt_template": {
-    "type": "text",
-    "default": "你需要代表 AstrBot 向当前会话发一条简短通知。\\n\\n事件信息：\\n- 平台 ID：{platform_id}\\n- 状态：{status_text}\\n- 说明：{detail}\\n\\n要求：\\n1. 用自然聊天语气，像平时在这个会话里说话。\\n2. 简短直接，不超过 80 个汉字。\\n3. 不要编造原因，不要输出列表，不要说“作为 AI”。\\n4. 只输出最终要发送的通知文本。",
-    "description": "LLM 生成通知文案时使用的提示词模板"
-  }
+    "target_platform_ids":  {
+                                "type":  "text",
+                                "default":  "",
+                                "description":  "要监控的 aiocqhttp 平台 ID。每行或用英文逗号填写一个；留空表示监控全部 OneBot v11/NapCat 实例。"
+                            },
+    "poll_interval_seconds":  {
+                                  "type":  "int",
+                                  "default":  5,
+                                  "description":  "连接状态轮询间隔（秒）"
+                              },
+    "offline_cooldown_seconds":  {
+                                     "type":  "int",
+                                     "default":  600,
+                                     "description":  "同一平台相同状态的重复通知冷却时间（秒）"
+                                 },
+    "retry_window_seconds":  {
+                                 "type":  "int",
+                                 "default":  300,
+                                 "description":  "掉线通知未送达时持续重试的总时长（秒）。期间若管理员在其他平台发消息，新会话会自动加入投递。"
+                             },
+    "retry_interval_seconds":  {
+                                   "type":  "int",
+                                   "default":  10,
+                                   "description":  "跨平台通知失败后的重试间隔（秒）。"
+                               },
+    "notify_recovery":  {
+                            "type":  "bool",
+                            "default":  true,
+                            "description":  "NapCat 恢复连接后是否也发送通知"
+                        },
+    "use_llm":  {
+                    "type":  "bool",
+                    "default":  true,
+                    "description":  "是否优先用目标会话当前的模型与人格生成通知文案"
+                },
+    "fallback_offline_template":  {
+                                      "type":  "text",
+                                      "default":  "提醒一下，{platform_id} 对应的 NapCat 现在断开了，QQ 侧消息暂时收不到了。{detail}",
+                                      "description":  "掉线时的回退通知模板"
+                                  },
+    "fallback_recovery_template":  {
+                                       "type":  "text",
+                                       "default":  "好消息，{platform_id} 对应的 NapCat 已经重新连上了，QQ 侧消息恢复正常啦。{detail}",
+                                       "description":  "恢复时的回退通知模板"
+                                   },
+    "llm_prompt_template":  {
+                                "type":  "text",
+                                "default":  "你需要代表 AstrBot 向当前会话发一条简短通知。\\n\\n事件信息：\\n- 平台 ID：{platform_id}\\n- 状态：{status_text}\\n- 说明：{detail}\\n\\n要求：\\n1. 用自然聊天语气，像平时在这个会话里说话。\\n2. 简短直接，不超过 80 个汉字。\\n3. 不要编造原因，不要输出列表，不要说“作为 AI”。\\n4. 只输出最终要发送的通知文本。",
+                                "description":  "LLM 生成通知文案时使用的提示词模板"
+                            }
 }

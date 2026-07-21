@@ -1,8 +1,8 @@
 ﻿name: astrbot_plugin_napcat_offline_notice
 display_name: NapCat 掉线通知
-desc: 监控 OneBot v11/NapCat 连接状态，在掉线或恢复后主动通知指定会话，并尽量使用该会话当前的模型与人格生成提醒文案
-short_desc: NapCat 掉线后主动通知指定会话
+desc: 监控 OneBot v11/NapCat 连接状态，在掉线或恢复后自动通知所有 AstrBot 管理员，并保留管理员在各平台的会话并优先向非 QQ 平台推送
+short_desc: NapCat 掉线后自动通知所有管理员
 author: 瑞贝特
-version: 0.1.0
+repo: https://github.com/RabbitZheng4424/astrbot_plugin_napcat_offline_notice
+version: 0.3.0
 astrbot_version: ">=4.15"
-

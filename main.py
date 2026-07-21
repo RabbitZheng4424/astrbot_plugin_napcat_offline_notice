@@ -15,11 +15,11 @@ from astrbot.core.umo_alias import parse_umo
 @register(
     "astrbot_plugin_napcat_offline_notice",
     "瑞贝特",
-    "监控 OneBot v11/NapCat 连接状态，在掉线或恢复后主动通知指定会话，并尽量使用该会话当前的模型与人格生成提醒文案",
-    "0.1.0",
+    "监控 OneBot v11/NapCat 连接状态，保留管理员的多平台会话并优先向非 QQ 平台推送。",
+    "0.3.0",
 )
 class NapcatOfflineNoticePlugin(Star):
-    """NapCat 掉线通知插件。"""
+    """NapCat 掉线通知插件（跨平台投递版）。"""
 
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -27,6 +27,7 @@ class NapcatOfflineNoticePlugin(Star):
         self.monitor_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._last_platform_status: dict[str, dict[str, Any]] = {}
+        self._forced_offline_platforms: set[str] = set()  # 用于本地测试：假装这些平台离线
 
     async def initialize(self):
         """启动后台监控任务。"""
@@ -59,79 +60,56 @@ class NapcatOfflineNoticePlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @napcat_notice.command("bind")
     async def bind_target(self, event: AstrMessageEvent):
-        """将当前会话绑定为通知目标。"""
-        alias = self._extract_subcommand_payload(event.message_str, "napcat_notice bind")
-        umo = event.unified_msg_origin
-        targets = await self._load_targets()
-        parsed = parse_umo(umo)
+        """把当前平台会话显式加入通知目标。"""
 
-        for item in targets:
-            if item.get("umo") == umo:
-                if alias:
-                    item["alias"] = alias
-                await self._save_targets(targets)
-                yield event.plain_result(
-                    f"这个会话已经在通知列表里了。\n当前标记：{self._format_target_display(item)}"
-                )
-                return
-
-        target = {
-            "umo": umo,
-            "alias": alias,
-            "platform": parsed.get("platform", "unknown"),
-            "message_type": parsed.get("message_type", "unknown"),
-            "session_id": parsed.get("session_id", umo),
-            "created_at": int(time.time()),
-        }
-        targets.append(target)
-        await self._save_targets(targets)
-        lines = [
-            "已绑定当前会话为 NapCat 掉线通知目标。",
-            f"会话：{self._format_target_display(target)}",
-        ]
-        if hint := self._get_target_delivery_hint(target):
-            lines.append(f"提示：{hint}")
-        yield event.plain_result("\n".join(lines))
+        saved = await self._save_admin_session_if_needed(event, force=True)
+        if saved:
+            yield event.plain_result(
+                f"已绑定当前平台通知会话：{event.unified_msg_origin}\n"
+                "其他平台的已绑定会话会继续保留，不会被覆盖。"
+            )
+        else:
+            yield event.plain_result("当前会话无法绑定，请检查 unified_msg_origin。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @napcat_notice.command("unbind")
     async def unbind_target(self, event: AstrMessageEvent):
-        """解绑当前会话。"""
-        umo = event.unified_msg_origin
-        targets = await self._load_targets()
-        kept_targets = [item for item in targets if item.get("umo") != umo]
+        """只移除当前平台的通知目标。"""
 
-        if len(kept_targets) == len(targets):
-            yield event.plain_result("当前会话还没有绑定到通知列表。")
-            return
-
-        await self._save_targets(kept_targets)
-        yield event.plain_result("已解除当前会话的 NapCat 通知绑定。")
-
+        removed = await self._remove_admin_session_for_event(event)
+        if removed:
+            yield event.plain_result(f"已解绑当前平台通知会话：{removed}")
+        else:
+            yield event.plain_result("当前平台没有已绑定的通知会话。")
     @filter.permission_type(filter.PermissionType.ADMIN)
     @napcat_notice.command("list")
     async def list_targets(self, event: AstrMessageEvent):
-        """查看已绑定的通知会话。"""
-        targets = await self._load_targets()
-        if not targets:
-            yield event.plain_result(
-                "还没有绑定任何通知会话。\n请在目标对话里执行 /napcat_notice bind"
-            )
-            return
+        """查看当前配置的管理员和插件记住的推送会话。"""
+        admins = self._get_admins()
+        known_sessions = await self._load_admin_sessions()
+        lines = ["当前 AstrBot 配置的管理员（admins_id，仅作参考）："]
+        for idx, admin in enumerate(admins, 1):
+            lines.append(f"{idx}. {admin}")
+        if not admins:
+            lines.append("  （未配置；插件仍会按 event.is_admin() 记录管理员会话）")
 
-        lines = ["已绑定的通知会话："]
-        for index, item in enumerate(targets, start=1):
-            lines.append(f"{index}. {self._format_target_display(item)}")
-            lines.append(f"   {item.get('umo', '')}")
-            if hint := self._get_target_delivery_hint(item):
-                lines.append(f"   提示：{hint}")
+        lines.append("")
+        lines.append("插件记住的管理员跨平台会话（用于推送）：")
+        if known_sessions:
+            row = 0
+            for admin_id, sessions in known_sessions.items():
+                for platform_id, umo in sessions.items():
+                    row += 1
+                    lines.append(f"{row}. {admin_id} [{platform_id}] -> {umo}")
+        else:
+            lines.append("  （暂未记住任何会话，请管理员先在其他平台和 AstrBot 说句话）")
+
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @napcat_notice.command("status")
     async def show_status(self, event: AstrMessageEvent):
         """查看监控状态。"""
-        targets = await self._load_targets()
         configured_ids = sorted(self._configured_platform_ids())
         monitored_platforms = self._get_monitored_platforms()
         current_rows = self._collect_platform_status_rows(monitored_platforms)
@@ -140,15 +118,15 @@ class NapcatOfflineNoticePlugin(Star):
             for platform_id in configured_ids
             if platform_id not in {platform.meta().id for platform in monitored_platforms}
         ]
+        forced_offline = sorted(self._forced_offline_platforms)
 
         lines = [
-            "NapCat 掉线通知状态：",
+            "NapCat 掉线通知状态（v0.3.0 跨平台投递版）：",
             f"- 监控范围: {self._format_monitored_platform_hint()}",
             f"- 轮询间隔: {self._poll_interval_seconds()} 秒",
             f"- 通知冷却: {self._cooldown_seconds()} 秒",
             f"- 恢复通知: {'开启' if self._notify_recovery() else '关闭'}",
             f"- LLM 文案: {'开启' if self._use_llm() else '关闭'}",
-            f"- 已绑定会话数: {len(targets)}",
         ]
 
         if current_rows:
@@ -157,14 +135,9 @@ class NapcatOfflineNoticePlugin(Star):
         else:
             lines.append("- 当前没有匹配到可监控的 aiocqhttp 平台实例。")
 
-        target_hints = [
-            f"  - {self._format_target_display(item)}：{hint}"
-            for item in targets
-            if (hint := self._get_target_delivery_hint(item))
-        ]
-        if target_hints:
-            lines.append("- 当前已绑定目标中的发送限制提示：")
-            lines.extend(target_hints)
+        if forced_offline:
+            lines.append("- ⚠️ 以下平台正在被'假装离线'（测试用）：")
+            lines.extend(f"  - {pid}" for pid in forced_offline)
 
         if missing:
             lines.append("- 以下配置的平台 ID 当前不存在：")
@@ -175,20 +148,90 @@ class NapcatOfflineNoticePlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @napcat_notice.command("test")
     async def send_test_notice(self, event: AstrMessageEvent):
-        """手动发送测试通知到全部已绑定会话。"""
-        targets = await self._load_targets()
-        if not targets:
-            yield event.plain_result("还没有绑定任何通知会话，无法发送测试通知。")
+        """手动发送测试通知给所有管理员。"""
+        # 管理员命令本身已通过权限过滤，因此可作为显式绑定兜底。
+        await self._save_admin_session_if_needed(event, force=True)
+
+        current_platform_id = parse_umo(event.unified_msg_origin).get("platform", "")
+        monitored_platforms = self._get_monitored_platforms()
+        if any(platform.meta().id == current_platform_id for platform in monitored_platforms):
+            yield event.plain_result(
+                "当前命令来自正在监控的 QQ/NapCat 平台。请到微信、WebChat、"
+                "企业微信等其他平台执行 /napcat_notice bind，再回到任意平台测试。"
+            )
             return
 
-        monitored_platforms = self._get_monitored_platforms()
         platform_id = monitored_platforms[0].meta().id if monitored_platforms else "aiocqhttp"
-        await self._notify_targets(
+
+        yield event.plain_result(
+            "正在向所有已知管理员会话发送测试通知..."
+        )
+
+        success_count = await self._notify_admins(
             status="offline",
             platform_id=platform_id,
             detail="这是管理员手动触发的测试通知。",
+            force_send=True,
         )
-        yield event.plain_result(f"已向 {len(targets)} 个已绑定会话发送测试通知。")
+
+        yield event.plain_result(
+            f"已向 {success_count} 个管理员会话发送测试通知。"
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @napcat_notice.command("fake_offline")
+    async def fake_platform_offline(self, event: AstrMessageEvent):
+        """假装某个（或所有） NapCat 平台离线，用于本地测试。
+
+        用法：
+        - /napcat_notice fake_offline          假装所有监控的平台离线
+        - /napcat_notice fake_offline <平台ID>  假装指定平台离线
+        """
+        payload = self._extract_subcommand_payload(event.message_str, "napcat_notice fake_offline")
+        if payload:
+            target_ids = {pid.strip() for pid in payload.replace(",", " ").split() if pid.strip()}
+        else:
+            target_ids = {p.meta().id for p in self._get_monitored_platforms()}
+
+        if not target_ids:
+            yield event.plain_result(
+                "没有找到可监控的 aiocqhttp 平台实例。"
+            )
+            return
+
+        self._forced_offline_platforms.update(target_ids)
+        lines = ["已将以下平台标记为'假装离线'（会在下次轮询时触发通知）："]
+        lines.extend(f"  - {pid}" for pid in sorted(target_ids))
+        yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @napcat_notice.command("fake_online")
+    async def fake_platform_online(self, event: AstrMessageEvent):
+        """取消假装离线，恢复真实连接状态。
+
+        用法：
+        - /napcat_notice fake_online          取消所有假装
+        - /napcat_notice fake_online <平台ID>  取消指定平台的假装
+        """
+        payload = self._extract_subcommand_payload(event.message_str, "napcat_notice fake_online")
+        if payload:
+            target_ids = {pid.strip() for pid in payload.replace(",", " ").split() if pid.strip()}
+        else:
+            target_ids = set(self._forced_offline_platforms)
+
+        if not target_ids:
+            yield event.plain_result(
+                "当前没有平台被标记为'假装离线'。"
+            )
+            return
+
+        removed = target_ids & self._forced_offline_platforms
+        for pid in removed:
+            self._forced_offline_platforms.discard(pid)
+
+        lines = ["已取消以下平台的'假装离线'标记："]
+        lines.extend(f"  - {pid}" for pid in sorted(removed))
+        yield event.plain_result("\n".join(lines))
 
     async def _monitor_loop(self):
         while not self._stop_event.is_set():
@@ -212,8 +255,9 @@ class NapcatOfflineNoticePlugin(Star):
         for platform in self._get_monitored_platforms():
             platform_id = platform.meta().id
             connection_count = self._get_connection_count(platform)
+            is_online = self._is_platform_online(platform_id, connection_count)
             self._last_platform_status[platform_id] = {
-                "online": connection_count > 0,
+                "online": is_online,
                 "connection_count": connection_count,
                 "updated_at": int(time.time()),
             }
@@ -222,11 +266,11 @@ class NapcatOfflineNoticePlugin(Star):
         for platform in self._get_monitored_platforms():
             platform_id = platform.meta().id
             connection_count = self._get_connection_count(platform)
-            online = connection_count > 0
+            is_online = self._is_platform_online(platform_id, connection_count)
             previous = self._last_platform_status.get(platform_id)
 
             self._last_platform_status[platform_id] = {
-                "online": online,
+                "online": is_online,
                 "connection_count": connection_count,
                 "updated_at": int(time.time()),
             }
@@ -236,10 +280,10 @@ class NapcatOfflineNoticePlugin(Star):
 
             previous_online = bool(previous.get("online"))
             previous_count = int(previous.get("connection_count", 0))
-            if previous_online == online:
+            if previous_online == is_online:
                 continue
 
-            if online:
+            if is_online:
                 if not self._notify_recovery():
                     logger.info(
                         "[NapcatOfflineNotice] %s 已恢复连接，但恢复通知已关闭。",
@@ -272,52 +316,127 @@ class NapcatOfflineNoticePlugin(Star):
             platform_id,
             status,
         )
-        await self._notify_targets(status=status, platform_id=platform_id, detail=detail)
+        success_count = await self._notify_admins(
+            status=status,
+            platform_id=platform_id,
+            detail=detail,
+        )
+        if success_count > 0:
+            await self._mark_notification_sent(status, platform_id)
 
-    async def _notify_targets(self, status: str, platform_id: str, detail: str):
-        targets = await self._load_targets()
-        if not targets:
-            logger.info(
-                "[NapcatOfflineNotice] 已检测到 %s 的 %s，但当前没有绑定任何通知会话。",
-                platform_id,
-                status,
+    async def _notify_admins(
+        self,
+        status: str,
+        platform_id: str,
+        detail: str,
+        force_send: bool = False,
+    ) -> int:
+        """向已记录的管理员跨平台会话发送通知。"""
+
+        successful_umos: set[str] = set()
+        attempted_umos: set[str] = set()
+        start_time = time.time()
+        max_wait = 0 if force_send else self._retry_window_seconds()
+        retry_interval = self._retry_interval_seconds()
+
+        while True:
+            admin_sessions = await self._load_admin_sessions()
+            targets = self._build_delivery_targets(
+                admin_sessions,
+                excluded_platform_id=platform_id,
             )
-            return
+            pending_targets = [
+                (admin_id, umo)
+                for admin_id, umo in targets
+                if umo not in successful_umos
+            ]
 
-        for target in targets:
-            target_umo = target.get("umo", "").strip()
-            if not target_umo:
-                continue
-            if not self._can_deliver_to_target(
-                target,
-                source_platform_id=platform_id,
-                status=status,
-            ):
-                continue
-
-            text = await self._build_notice_text(
-                target_umo=target_umo,
-                status=status,
-                platform_id=platform_id,
-                detail=detail,
-            )
-            try:
-                sent = await self.context.send_message(
-                    target_umo,
-                    MessageChain([Plain(text)]),
+            if not targets:
+                logger.warning(
+                    "[NapcatOfflineNotice] 没有可用的跨平台管理员会话。"
+                    "请管理员先在微信、WebChat、企业微信等其他平台和 AstrBot 说句话。"
                 )
-                if not sent:
-                    logger.warning(
-                        "[NapcatOfflineNotice] 未找到可发送的平台，会话=%s",
-                        target_umo,
+            for admin_id, umo in pending_targets:
+                attempted_umos.add(umo)
+                try:
+                    text = await self._build_notice_text(
+                        target_umo=umo,
+                        status=status,
+                        platform_id=platform_id,
+                        detail=detail,
                     )
-            except Exception as exc:
-                logger.exception(
-                    "[NapcatOfflineNotice] 向会话 %s 发送通知失败: %s",
-                    target_umo,
-                    exc,
-                )
+                    sent = await self.context.send_message(
+                        umo,
+                        MessageChain([Plain(text)]),
+                    )
+                    if sent:
+                        successful_umos.add(umo)
+                        logger.info(
+                            "[NapcatOfflineNotice] 已向管理员 %s 的跨平台会话发送通知: %s",
+                            admin_id,
+                            umo,
+                        )
+                    else:
+                        logger.warning(
+                            "[NapcatOfflineNotice] 未找到会话对应的平台，发送失败: %s",
+                            umo,
+                        )
+                except Exception as exc:
+                    logger.exception(
+                        "[NapcatOfflineNotice] 向管理员 %s（%s）发送通知失败: %s",
+                        admin_id,
+                        umo,
+                        exc,
+                    )
 
+            if force_send or successful_umos:
+                break
+            if time.time() - start_time >= max_wait:
+                break
+            await asyncio.sleep(retry_interval)
+
+        if not successful_umos:
+            logger.error(
+                "[NapcatOfflineNotice] 跨平台通知未送达。已尝试 %d 个会话；"
+                "请运行 /napcat_notice list 检查已记录平台。",
+                len(attempted_umos),
+            )
+        return len(successful_umos)
+
+    def _build_delivery_targets(
+        self,
+        admin_sessions: dict[str, dict[str, str]],
+        *,
+        excluded_platform_id: str,
+    ) -> list[tuple[str, str]]:
+        """按平台可用性排序，并排除正在掉线的 NapCat 平台。"""
+
+        available_platforms = {
+            platform.meta().id: platform
+            for platform in self.context.platform_manager.platform_insts
+        }
+        ranked: list[tuple[int, str, str]] = []
+        seen: set[str] = set()
+        for admin_id, sessions in admin_sessions.items():
+            for stored_platform_id, umo in sessions.items():
+                if not umo or umo in seen:
+                    continue
+                parsed_platform_id = parse_umo(umo).get("platform", "")
+                target_platform_id = parsed_platform_id or stored_platform_id
+                if target_platform_id == excluded_platform_id:
+                    continue
+                platform = available_platforms.get(target_platform_id)
+                if platform is None:
+                    continue
+                if platform.meta().name == "aiocqhttp":
+                    continue
+                stats = platform.get_stats()
+                status = str(stats.get("status", "")) if isinstance(stats, dict) else ""
+                rank = 0 if status == "running" else 1
+                ranked.append((rank, admin_id, umo))
+                seen.add(umo)
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [(admin_id, umo) for _, admin_id, umo in ranked]
     async def _build_notice_text(
         self,
         *,
@@ -394,10 +513,19 @@ class NapcatOfflineNoticePlugin(Star):
         platform_id: str,
         detail: str,
     ) -> str:
-        template_key = (
-            "fallback_recovery_template" if status == "recovery" else "fallback_offline_template"
-        )
-        template = str(self.config.get(template_key, "") or "")
+        if status == "recovery":
+            template_key = "fallback_recovery_template"
+            default_template = (
+                "好消息，{platform_id} 对应的 NapCat 已经重新连上了，"
+                "QQ 侧消息恢复正常啦。{detail}"
+            )
+        else:
+            template_key = "fallback_offline_template"
+            default_template = (
+                "提醒一下，{platform_id} 对应的 NapCat 现在断开了，"
+                "QQ 侧消息暂时收不到了。{detail}"
+            )
+        template = str(self.config.get(template_key, "") or default_template)
         return self._render_template(
             template,
             target_umo=target_umo,
@@ -407,51 +535,149 @@ class NapcatOfflineNoticePlugin(Star):
             detail=detail,
         )
 
-    async def _load_targets(self) -> list[dict[str, Any]]:
-        raw = await self.get_kv_data("targets", [])
-        if not isinstance(raw, list):
-            return []
+    async def _load_admin_sessions(self) -> dict[str, dict[str, str]]:
+        """加载管理员的多平台会话，并兼容 0.2.x 单会话格式。"""
 
-        targets: list[dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, dict):
+        raw = await self.get_kv_data("admin_sessions", {})
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, dict[str, str]] = {}
+        migrated = False
+        for raw_admin_id, raw_sessions in raw.items():
+            admin_id = str(raw_admin_id).strip()
+            if not admin_id:
                 continue
-            umo = str(item.get("umo", "")).strip()
-            if not umo:
+            sessions: dict[str, str] = {}
+            if isinstance(raw_sessions, str):
+                umo = raw_sessions.strip()
+                if umo:
+                    sessions[parse_umo(umo).get("platform", "unknown")] = umo
+                    migrated = True
+            elif isinstance(raw_sessions, dict):
+                for raw_platform_id, raw_umo in raw_sessions.items():
+                    if not isinstance(raw_umo, str) or not raw_umo.strip():
+                        continue
+                    umo = raw_umo.strip()
+                    platform_id = parse_umo(umo).get("platform", "") or str(raw_platform_id)
+                    sessions[platform_id] = umo
+            if sessions:
+                result[admin_id] = sessions
+        if migrated:
+            await self._save_admin_sessions(result)
+        return result
+
+    async def _save_admin_sessions(
+        self,
+        admin_sessions: dict[str, dict[str, str]],
+    ) -> None:
+        await self.put_kv_data("admin_sessions", admin_sessions)
+
+    async def _save_admin_session_if_needed(
+        self,
+        event: AstrMessageEvent,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """记录管理员在每个平台的最近会话，不让 QQ 覆盖其他平台。"""
+
+        if not force and not event.is_admin():
+            return False
+        try:
+            sender_id = str(event.get_sender_id()).strip()
+        except Exception:
+            sender_id = ""
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not umo:
+            return False
+        platform_id = parse_umo(umo).get("platform", "").strip()
+        if not platform_id:
+            return False
+        admin_id = sender_id or f"admin@{platform_id}"
+
+        admin_sessions = await self._load_admin_sessions()
+        sessions = admin_sessions.setdefault(admin_id, {})
+        if sessions.get(platform_id) == umo:
+            return True
+        sessions[platform_id] = umo
+        await self._save_admin_sessions(admin_sessions)
+        logger.info(
+            "[NapcatOfflineNotice] 已记录管理员 %s 的 %s 会话: %s",
+            admin_id,
+            platform_id,
+            umo,
+        )
+        return True
+
+    async def _remove_admin_session_for_event(
+        self,
+        event: AstrMessageEvent,
+    ) -> str | None:
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        platform_id = parse_umo(umo).get("platform", "").strip()
+        if not platform_id:
+            return None
+        try:
+            sender_id = str(event.get_sender_id()).strip()
+        except Exception:
+            sender_id = ""
+        admin_sessions = await self._load_admin_sessions()
+        candidate_admin_ids = [sender_id] if sender_id else []
+        candidate_admin_ids.extend(
+            admin_id
+            for admin_id, sessions in admin_sessions.items()
+            if sessions.get(platform_id) == umo and admin_id not in candidate_admin_ids
+        )
+        for admin_id in candidate_admin_ids:
+            sessions = admin_sessions.get(admin_id)
+            if not sessions or platform_id not in sessions:
                 continue
-            targets.append(
-                {
-                    "umo": umo,
-                    "alias": str(item.get("alias", "")).strip(),
-                    "platform": str(item.get("platform", "")).strip(),
-                    "message_type": str(item.get("message_type", "")).strip(),
-                    "session_id": str(item.get("session_id", "")).strip(),
-                    "created_at": int(item.get("created_at", 0) or 0),
-                }
+            removed = sessions.pop(platform_id)
+            if not sessions:
+                admin_sessions.pop(admin_id, None)
+            await self._save_admin_sessions(admin_sessions)
+            return removed
+        return None
+    def _get_admins(self) -> list[str]:
+        """从 AstrBot 全局配置读取 admins_id。"""
+        try:
+            config = self.context.get_config()
+            if hasattr(config, "get"):
+                admins = config.get("admins_id", [])
+            else:
+                admins = getattr(config, "admins_id", [])
+            if isinstance(admins, list):
+                return [str(a).strip() for a in admins if a and str(a).strip()]
+        except Exception as exc:
+            logger.warning(
+                "[NapcatOfflineNotice] 读取 AstrBot admins_id 配置失败: %s",
+                exc,
             )
-        return targets
-
-    async def _save_targets(self, targets: list[dict[str, Any]]):
-        await self.put_kv_data("targets", targets)
+        return []
 
     async def _should_send_notification(self, status: str, platform_id: str) -> bool:
         cooldown = self._cooldown_seconds()
         if cooldown <= 0:
             return True
-
-        key = f"notify_ts:{status}:{platform_id}"
-        now = int(time.time())
+        key = f"delivered_ts:v3:{status}:{platform_id}"
         last_sent_at = await self.get_kv_data(key, 0)
         try:
             last_sent_at_int = int(last_sent_at or 0)
         except (TypeError, ValueError):
             last_sent_at_int = 0
+        return not last_sent_at_int or int(time.time()) - last_sent_at_int >= cooldown
 
-        if last_sent_at_int and now - last_sent_at_int < cooldown:
+    async def _mark_notification_sent(self, status: str, platform_id: str) -> None:
+        key = f"delivered_ts:v3:{status}:{platform_id}"
+        await self.put_kv_data(key, int(time.time()))
+
+    def _is_platform_online(self, platform_id: str, real_connection_count: int) -> bool:
+        """
+        判断平台是否在线。
+        优先看是否被标记为 '假装离线'，否则看真实连接数。
+        """
+        if platform_id in self._forced_offline_platforms:
             return False
-
-        await self.put_kv_data(key, now)
-        return True
+        return real_connection_count > 0
 
     def _get_monitored_platforms(self) -> list[Any]:
         target_ids = self._configured_platform_ids()
@@ -469,9 +695,14 @@ class NapcatOfflineNoticePlugin(Star):
         rows: list[str] = []
         for platform in platforms:
             platform_id = platform.meta().id
-            connection_count = self._get_connection_count(platform)
-            status_text = "在线" if connection_count > 0 else "离线"
-            rows.append(f"  - {platform_id}: {status_text} (连接数: {connection_count})")
+            real_count = self._get_connection_count(platform)
+            is_online = self._is_platform_online(platform_id, real_count)
+            status_text = "在线" if is_online else "离线"
+
+            if platform_id in self._forced_offline_platforms:
+                rows.append(f"  - {platform_id}: {status_text} (假装离线，真实连接数: {real_count})")
+            else:
+                rows.append(f"  - {platform_id}: {status_text} (连接数: {real_count})")
         return rows
 
     def _configured_platform_ids(self) -> set[str]:
@@ -509,65 +740,6 @@ class NapcatOfflineNoticePlugin(Star):
         if not configured_ids:
             return "全部 aiocqhttp / OneBot v11 实例"
         return ", ".join(configured_ids)
-
-    def _format_target_display(self, target: dict[str, Any]) -> str:
-        alias = str(target.get("alias", "")).strip()
-        if alias:
-            return alias
-
-        platform = str(target.get("platform", "unknown")).strip() or "unknown"
-        message_type = str(target.get("message_type", "unknown")).strip() or "unknown"
-        session_id = str(target.get("session_id", target.get("umo", ""))).strip()
-        return f"{platform} / {message_type} / {session_id}"
-
-    def _get_target_delivery_hint(self, target: dict[str, Any]) -> str:
-        platform_id = str(target.get("platform", "")).strip()
-        platform_name = self._get_platform_name_by_id(platform_id)
-        if platform_name == "weixin_official_account":
-            return "微信公众号适配器不支持主动推送，绑定后也无法收到掉线通知。"
-        if platform_name == "weixin_oc":
-            return (
-                "个人微信依赖最近会话上下文。目标会话需要近期给 AstrBot 发过消息，"
-                "刷新上下文后主动通知才更可能成功。"
-            )
-        if platform_name == "wecom":
-            return "企业微信部分模式不支持主动发送；若是客服模式，通常无法收到主动通知。"
-        if platform_name == "aiocqhttp":
-            return (
-                "如果这里绑定的是同一个 NapCat / OneBot v11 平台实例，"
-                "它掉线时无法靠自己给自己发通知；请优先绑定到其他仍在线的平台会话。"
-            )
-        return ""
-
-    def _can_deliver_to_target(
-        self,
-        target: dict[str, Any],
-        *,
-        source_platform_id: str,
-        status: str,
-    ) -> bool:
-        target_platform_id = str(target.get("platform", "")).strip()
-        target_platform_name = self._get_platform_name_by_id(target_platform_id)
-        if (
-            status == "offline"
-            and target_platform_name == "aiocqhttp"
-            and target_platform_id == source_platform_id
-        ):
-            logger.warning(
-                "[NapcatOfflineNotice] 跳过向 %s 发送离线通知：目标会话就在同一个 NapCat 平台 %s 上，"
-                "该平台离线时无法给自己发通知。",
-                target.get("umo", "").strip(),
-                source_platform_id,
-            )
-            return False
-        return True
-
-    def _get_platform_name_by_id(self, platform_id: str) -> str:
-        for platform in self.context.platform_manager.platform_insts:
-            meta = platform.meta()
-            if meta.id == platform_id:
-                return meta.name
-        return platform_id
 
     def _status_text(self, status: str) -> str:
         if status == "recovery":
@@ -612,3 +784,27 @@ class NapcatOfflineNoticePlugin(Star):
     def _use_llm(self) -> bool:
         return bool(self.config.get("use_llm", True))
 
+    def _retry_window_seconds(self) -> int:
+        try:
+            return max(0, int(self.config.get("retry_window_seconds", 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    def _retry_interval_seconds(self) -> int:
+        try:
+            return max(1, int(self.config.get("retry_interval_seconds", 10)))
+        except (TypeError, ValueError):
+            return 10
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_any_message(self, event: AstrMessageEvent):
+        """
+        钩子：任何消息进来，先看看是不是管理员。
+        如果是，保存该会话，用于以后推送通知。
+        """
+        try:
+            await self._save_admin_session_if_needed(event)
+        except Exception:
+            pass
+        # 不处理消息，不阻塞后续处理
+        return None
